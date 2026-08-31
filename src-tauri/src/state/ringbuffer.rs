@@ -78,3 +78,52 @@ impl TelemetryStore {
         self.error_count.load(Ordering::Relaxed)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_signals_merges_and_counts_frames() {
+        let store = TelemetryStore::default();
+        store.update_signals(HashMap::from([("A".to_string(), 1.0)]));
+        store.update_signals(HashMap::from([("B".to_string(), 2.0), ("A".to_string(), 3.0)]));
+
+        let snap = store.snapshot();
+        assert_eq!(snap.get("A").copied(), Some(3.0));
+        assert_eq!(snap.get("B").copied(), Some(2.0));
+        assert_eq!(store.frame_count(), 2);
+    }
+
+    #[test]
+    fn bus_load_round_trips() {
+        let store = TelemetryStore::default();
+        assert_eq!(store.bus_load(), 0.0);
+        store.set_bus_load(42.5);
+        assert_eq!(store.bus_load(), 42.5);
+    }
+
+    #[test]
+    fn faults_round_trip() {
+        let store = TelemetryStore::default();
+        assert!(!store.faults().bus_off);
+        store.set_faults(FaultFlags {
+            bus_off: true,
+            thermal_throttle: false,
+            over_voltage: true,
+        });
+        let faults = store.faults();
+        assert!(faults.bus_off);
+        assert!(!faults.thermal_throttle);
+        assert!(faults.over_voltage);
+    }
+
+    #[test]
+    fn record_error_increments_counter() {
+        let store = TelemetryStore::default();
+        assert_eq!(store.error_count(), 0);
+        store.record_error();
+        store.record_error();
+        assert_eq!(store.error_count(), 2);
+    }
+}

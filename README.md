@@ -18,8 +18,10 @@ signal database, and streams telemetry to a React/TypeScript dashboard.
   `start_replay`, `start_recording`/`stop_recording`, `stop_can_stream`,
   `list_can_interfaces`) that wire the listener → decoder → store → 60Hz UI
   event emitter (`telemetry-update`, `can-frame`, `stream-status`).
-- `src/` — React dashboard: RPM/temp/current/bus-load gauges, live line
-  charts, and a raw frame inspector table.
+- `src/` — React dashboard: user-configurable gauge/chart slots (1-6, any
+  DBC signal), bus-load gauge, a raw frame inspector table, and a
+  threshold alert log (sound + desktop notification on entering danger).
+  Interface/baud/DBC path/slot layout persist to `localStorage`.
 - `scripts/can_simulator.py` — broadcasts simulated `MotorStatus` frames on
   a virtual CAN interface for local testing.
 - `scripts/motor.dbc` — sample DBC matching the simulator's frame layout.
@@ -71,3 +73,19 @@ stream on `vcan0` at 500000 baud.
 cd src-tauri
 cargo test
 ```
+
+Covers DBC parsing (incl. multiplexed signals, `VAL_` tables, `CM_`
+comments), bit extraction/sign-extension, the candump-format log
+reader/writer, replay pacing/cancellation, the bus-load monitor, and the
+telemetry store. The Tauri command layer (`src-tauri/src/commands/`) is
+thin wiring over these and isn't separately unit-tested.
+
+There's no frontend test suite yet — `npx tsc --noEmit` is currently the
+only automated frontend check.
+
+## Platform
+
+Linux only: the `socketcan` dependency is gated to
+`cfg(target_os = "linux")`, and the app is built/tested against Linux's
+SocketCAN stack. `cargo check`/`build` on macOS or Windows will fail to
+resolve that dependency by design, not by omission.
