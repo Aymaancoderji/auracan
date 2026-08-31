@@ -1,0 +1,17 @@
+VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_: MCU ECU
+
+BO_ 256 MotorStatus: 8 MCU
+ SG_ MotorRPM : 0|16@1- (1,0) [-32000|32000] "rpm" ECU
+ SG_ ControllerTemp : 16|8@1+ (1,-40) [-40|215] "degC" ECU
+ SG_ OutputCurrent : 24|16@1+ (0.1,0) [0|4000] "A" ECU
+
+BO_ 257 MotorFaults: 2 MCU
+ SG_ BusOff : 0|1@1+ (1,0) [0|1] "" ECU
+ SG_ ThermalThrottle : 1|1@1+ (1,0) [0|1] "" ECU
+ SG_ OverVoltage : 2|1@1+ (1,0) [0|1] "" ECU
