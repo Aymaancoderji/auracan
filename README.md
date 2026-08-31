@@ -82,8 +82,19 @@ sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
 Rust (via rustup) and Node.js are also required.
 
 > Note: this repo's `package.json` currently pulls in Vite 7, which wants
-> Node >= 20.19. If you're on Node 18, either upgrade Node or pin Vite to a
-> 5.x/6.x release compatible with your runtime.
+> Node >= 20.19. On Node 18, `npm install` succeeds but `vite build`/`vite
+> dev` fail (`@tailwindcss/oxide`'s native binding won't load — Node 18 is
+> below its own `>= 20` engine requirement too). If you can't upgrade your
+> system Node, installing a standalone Node 20+ into a local directory and
+> prepending it to `PATH` for this project works without touching the
+> system install or needing root:
+> ```bash
+> mkdir -p ~/.local/node20
+> curl -L https://nodejs.org/dist/v20.19.0/node-v20.19.0-linux-x64.tar.xz \
+>   | tar -xJ -C ~/.local/node20 --strip-components=1
+> export PATH="$HOME/.local/node20/bin:$PATH"
+> rm -rf node_modules package-lock.json && npm install
+> ```
 
 ## Virtual CAN setup (for local testing without real hardware)
 
@@ -121,7 +132,9 @@ dropdowns above them; add/remove slots with "+ Add slot" / "×".
   it through the same pipeline as a live stream, paced by its original
   timestamps.
 
-## Testing the Rust logic
+## Testing
+
+Rust:
 
 ```bash
 cd src-tauri
@@ -134,8 +147,20 @@ reader/writer, replay pacing/cancellation, the bus-load monitor, and the
 telemetry store. The Tauri command layer (`src-tauri/src/commands/`) is
 thin wiring over these and isn't separately unit-tested.
 
-There's no frontend test suite yet — `npx tsc --noEmit` is currently the
-only automated frontend check.
+Frontend (Vitest + React Testing Library, needs Node >= 20 — see the
+Prerequisites note above):
+
+```bash
+npm test          # run once
+npm run test:watch
+```
+
+Covers the pure logic in `src/lib/` (alert-level classification, DBC
+signal flattening, hex/byte formatting, settings persistence incl.
+malformed-storage fallback) and a couple of component render checks
+(`Gauge`, `AlertLog`). Not yet covered: `App.tsx` itself (would need
+mocking `@tauri-apps/api`'s `invoke`/`listen`, which only work inside a
+real Tauri webview) and `Chart`/`FrameLog`.
 
 ## Platform
 
@@ -146,9 +171,13 @@ resolve that dependency by design, not by omission.
 
 ## Screenshots
 
-None yet — the dev environment this was built in can't complete a full
-`npm run tauri dev` locally (Node 18 vs. Vite 7's Node >= 20.19
-requirement, and the GTK/WebKit headers above aren't installed), so
-there's no way to capture one that's actually accurate. If you get it
-running, a screenshot or short GIF of the dashboard here would be a
-welcome addition.
+![AuraCAN dashboard, idle state](docs/dashboard.jpg)
+
+Captured from `npm run dev` in a browser (idle state, no DBC loaded
+yet), not a native Tauri window — this environment still can't complete
+a full `npm run tauri dev`/`cargo tauri build` (GTK/WebKit headers
+aren't installed and there's no `sudo` here to add them; see
+[Prerequisites](#prerequisites-linux)). The web UI and native window
+render the same React app, but a real screenshot showing live gauges,
+alerts, and the frame inspector populated would still be a welcome
+addition once someone runs it against real or simulated traffic.
