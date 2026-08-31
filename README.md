@@ -9,11 +9,15 @@ signal database, and streams telemetry to a React/TypeScript dashboard.
 - `src-tauri/src/can/` — `CanFrame`, bit-level signal extraction, and the
   `.dbc` parser (`DbcDatabase`, `SignalDecoder`).
 - `src-tauri/src/listener/` — async, non-blocking SocketCAN reader
-  (`socketcan` crate, tokio) and a rolling bus-load monitor.
+  (`socketcan` crate, tokio) with reconnect-on-drop, a rolling bus-load
+  monitor, a `candump -l`-format log reader/writer (`candump`), and a file
+  replay driver (`replay`) that feeds a recorded log through the same
+  pipeline as a live socket.
 - `src-tauri/src/state/` — shared telemetry store (`TelemetryStore`).
 - `src-tauri/src/commands/` — Tauri commands (`load_dbc`, `start_can_stream`,
-  `stop_can_stream`) that wire the listener → decoder → store → 60Hz UI
-  event emitter (`telemetry-update`, `can-frame`).
+  `start_replay`, `start_recording`/`stop_recording`, `stop_can_stream`,
+  `list_can_interfaces`) that wire the listener → decoder → store → 60Hz UI
+  event emitter (`telemetry-update`, `can-frame`, `stream-status`).
 - `src/` — React dashboard: RPM/temp/current/bus-load gauges, live line
   charts, and a raw frame inspector table.
 - `scripts/can_simulator.py` — broadcasts simulated `MotorStatus` frames on

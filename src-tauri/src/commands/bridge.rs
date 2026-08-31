@@ -1,13 +1,17 @@
-use std::sync::Arc;
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Write};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use crossbeam_channel::unbounded;
+use crossbeam_channel::{unbounded, Receiver};
 use serde::Serialize;
 use socketcan::tokio::CanSocket;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::{watch, Mutex};
 
 use crate::can::{CanFrame, DbcDatabase};
+use crate::listener::candump::format_line;
+use crate::listener::replay::{replay_frames, ReplayExit};
 use crate::listener::socketcan::{bind_socket, poll_frames, StreamExit};
 use crate::state::TelemetryStore;
 
@@ -15,12 +19,27 @@ use crate::state::TelemetryStore;
 /// before giving up and reporting the stream as disconnected.
 const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 
+/// An open recording sink: every frame the decode task sees while this is
+/// set gets appended as a `candump -l` line. Flushed on drop so a
+/// forgotten `stop_recording` (or app exit) doesn't lose buffered lines.
+struct RecordingSink {
+    writer: BufWriter<File>,
+    interface: String,
+}
+
+impl Drop for RecordingSink {
+    fn drop(&mut self) {
+        let _ = self.writer.flush();
+    }
+}
+
 /// Shared app state exposed to Tauri commands.
 pub struct AppState {
     pub store: Arc<TelemetryStore>,
     pub dbc: Arc<Mutex<DbcDatabase>>,
     pub streaming: Arc<Mutex<bool>>,
     pub cancel: Arc<Mutex<Option<watch::Sender<bool>>>>,
+    recording: Arc<StdMutex<Option<RecordingSink>>>,
 }
 
 impl Default for AppState {
@@ -30,6 +49,7 @@ impl Default for AppState {
             dbc: Arc::new(Mutex::new(DbcDatabase::default())),
             streaming: Arc::new(Mutex::new(false)),
             cancel: Arc::new(Mutex::new(None)),
+            recording: Arc::new(StdMutex::new(None)),
         }
     }
 }
@@ -76,13 +96,15 @@ pub struct DbcInfo {
 
 /// Emitted on the `stream-status` event to tell the frontend about
 /// connection-level changes that aren't a user-initiated start/stop: the
-/// interface dropped and a reconnect is being attempted, or reconnection
-/// was abandoned after [`MAX_RECONNECT_ATTEMPTS`].
+/// interface dropped and a reconnect is being attempted, reconnection was
+/// abandoned after [`MAX_RECONNECT_ATTEMPTS`], or a replay reached the end
+/// of its log file.
 #[derive(Serialize, Clone)]
 #[serde(tag = "state", rename_all = "snake_case")]
 enum StreamStatus {
     Reconnecting { attempt: u32, max_attempts: u32 },
     Disconnected { reason: String },
+    Finished,
 }
 
 /// Lists SocketCAN-capable interfaces present on the system, for the
@@ -90,6 +112,112 @@ enum StreamStatus {
 #[tauri::command]
 pub fn list_can_interfaces() -> Vec<String> {
     crate::listener::socketcan::list_can_interfaces()
+}
+
+/// Starts recording every frame the decode task sees (live or replayed) to
+/// `path` as a `candump -l` log, so it can be replayed later via
+/// [`start_replay`] or inspected/replayed with standard `can-utils`.
+/// Overwrites `path` if it already exists. Recording is independent of
+/// streaming: it stays active across stream stop/start until
+/// [`stop_recording`] is called.
+#[tauri::command]
+pub fn start_recording(state: State<'_, AppState>, path: String, interface: String) -> Result<(), String> {
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&path)
+        .map_err(|e| format!("failed to open {path}: {e}"))?;
+    *state.recording.lock().unwrap() = Some(RecordingSink {
+        writer: BufWriter::new(file),
+        interface,
+    });
+    Ok(())
+}
+
+/// Stops the active recording (if any) and flushes it to disk.
+#[tauri::command]
+pub fn stop_recording(state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(mut sink) = state.recording.lock().unwrap().take() {
+        sink.writer.flush().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Spawns the tasks shared by both a live stream and a replay: decode
+/// frames against the DBC, update the telemetry store, append to the
+/// active recording (if any), emit raw frames, sample bus load, and push
+/// aggregated telemetry snapshots at ~60Hz. The reader task (live socket
+/// or file replay) is the only part that differs between the two and is
+/// set up by the caller before this is invoked.
+fn spawn_pipeline(
+    app: AppHandle,
+    store: Arc<TelemetryStore>,
+    dbc: Arc<Mutex<DbcDatabase>>,
+    recording: Arc<StdMutex<Option<RecordingSink>>>,
+    frame_rx: Receiver<CanFrame>,
+    bus_load_rx: Receiver<f64>,
+    mut cancel_rx: watch::Receiver<bool>,
+) {
+    // Decode task: applies DBC signal definitions and updates shared state.
+    let decode_store = store.clone();
+    let decode_app = app.clone();
+    tokio::task::spawn_blocking(move || {
+        while let Ok(frame) = frame_rx.recv() {
+            let decoded = dbc.blocking_lock().decode_frame(&frame);
+            if !decoded.is_empty() {
+                decode_store.update_signals(decoded);
+            }
+
+            if let Some(sink) = recording.lock().unwrap().as_mut() {
+                let _ = writeln!(sink.writer, "{}", format_line(&sink.interface, &frame));
+            }
+
+            let _ = decode_app.emit(
+                "can-frame",
+                RawFramePayload {
+                    id: frame.id,
+                    is_extended: frame.is_extended,
+                    dlc: frame.dlc,
+                    data: frame.data,
+                    timestamp_us: frame.timestamp_us,
+                },
+            );
+        }
+    });
+
+    // Bus-load sampler task.
+    let bus_load_store = store.clone();
+    tokio::task::spawn_blocking(move || {
+        while let Ok(load) = bus_load_rx.recv() {
+            bus_load_store.set_bus_load(load);
+        }
+    });
+
+    // Emitter task: pushes an aggregated telemetry snapshot at ~60Hz.
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(16));
+        loop {
+            tokio::select! {
+                _ = cancel_rx.changed() => {
+                    if *cancel_rx.borrow() {
+                        break;
+                    }
+                }
+                _ = interval.tick() => {
+                    let payload = TelemetryPayload {
+                        signals: store.snapshot(),
+                        bus_load_pct: store.bus_load(),
+                        frame_count: store.frame_count(),
+                        error_count: store.error_count(),
+                    };
+                    if app.emit("telemetry-update", payload).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Retries `bind_socket(interface)` with exponential backoff (500ms, 1s,
@@ -188,8 +316,6 @@ pub async fn start_can_stream(
     let (cancel_tx, cancel_rx) = watch::channel(false);
     *state.cancel.lock().await = Some(cancel_tx);
 
-    let store = state.store.clone();
-    let dbc = state.dbc.clone();
     let streaming_flag = state.streaming.clone();
 
     // Reader task: pulls frames off the kernel socket non-blockingly. If the
@@ -197,7 +323,7 @@ pub async fn start_can_stream(
     // giving up and reporting the stream as disconnected.
     let mut reader_cancel_rx = cancel_rx.clone();
     let reader_app = app.clone();
-    let reader_store = store.clone();
+    let reader_store = state.store.clone();
     let reader_interface = interface_name.clone();
     tokio::spawn(async move {
         let mut current_socket = socket;
@@ -234,63 +360,76 @@ pub async fn start_can_stream(
         *streaming_flag.lock().await = false;
     });
 
-    // Decode task: applies DBC signal definitions and updates shared state.
-    let decode_store = store.clone();
-    let decode_dbc = dbc.clone();
-    let decode_app = app.clone();
-    tokio::task::spawn_blocking(move || {
-        while let Ok(frame) = frame_rx.recv() {
-            let decoded = decode_dbc.blocking_lock().decode_frame(&frame);
-            if !decoded.is_empty() {
-                decode_store.update_signals(decoded);
-            }
-            let _ = decode_app.emit(
-                "can-frame",
-                RawFramePayload {
-                    id: frame.id,
-                    is_extended: frame.is_extended,
-                    dlc: frame.dlc,
-                    data: frame.data,
-                    timestamp_us: frame.timestamp_us,
-                },
-            );
-        }
-    });
+    spawn_pipeline(
+        app,
+        state.store.clone(),
+        state.dbc.clone(),
+        state.recording.clone(),
+        frame_rx,
+        bus_load_rx,
+        cancel_rx,
+    );
 
-    // Bus-load sampler task.
-    let bus_load_store = store.clone();
-    tokio::task::spawn_blocking(move || {
-        while let Ok(load) = bus_load_rx.recv() {
-            bus_load_store.set_bus_load(load);
-        }
-    });
+    Ok(())
+}
 
-    // Emitter task: pushes an aggregated telemetry snapshot at ~60Hz.
-    let emit_store = store.clone();
-    let mut emit_cancel_rx = cancel_rx.clone();
+/// Replays a `candump -l`-format log file (see [`start_recording`]) through
+/// the same decode → store → UI-event pipeline as a live stream, so the
+/// dashboard behaves identically whether it's watching a live bus or a
+/// recording. `speed` scales playback pacing (2.0 = twice as fast; `<= 0.0`
+/// plays as fast as possible).
+#[tauri::command]
+pub async fn start_replay(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    baud_rate: u32,
+    speed: f64,
+) -> Result<(), String> {
+    {
+        let mut streaming = state.streaming.lock().await;
+        if *streaming {
+            return Err("stream already running".into());
+        }
+        *streaming = true;
+    }
+
+    if !std::path::Path::new(&path).exists() {
+        *state.streaming.lock().await = false;
+        return Err(format!("file not found: {path}"));
+    }
+
+    let (frame_tx, frame_rx) = unbounded::<CanFrame>();
+    let (bus_load_tx, bus_load_rx) = unbounded::<f64>();
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    *state.cancel.lock().await = Some(cancel_tx);
+
+    let streaming_flag = state.streaming.clone();
+    let reader_cancel_rx = cancel_rx.clone();
+    let reader_app = app.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_millis(16));
-        loop {
-            tokio::select! {
-                _ = emit_cancel_rx.changed() => {
-                    if *emit_cancel_rx.borrow() {
-                        break;
-                    }
-                }
-                _ = interval.tick() => {
-                    let payload = TelemetryPayload {
-                        signals: emit_store.snapshot(),
-                        bus_load_pct: emit_store.bus_load(),
-                        frame_count: emit_store.frame_count(),
-                        error_count: emit_store.error_count(),
-                    };
-                    if app.emit("telemetry-update", payload).is_err() {
-                        break;
-                    }
-                }
+        let exit = replay_frames(&path, frame_tx, Some(bus_load_tx), baud_rate, speed, reader_cancel_rx).await;
+        match exit {
+            ReplayExit::Finished => {
+                let _ = reader_app.emit("stream-status", StreamStatus::Finished);
             }
+            ReplayExit::Failed(reason) => {
+                let _ = reader_app.emit("stream-status", StreamStatus::Disconnected { reason });
+            }
+            ReplayExit::Cancelled => {}
         }
+        *streaming_flag.lock().await = false;
     });
+
+    spawn_pipeline(
+        app,
+        state.store.clone(),
+        state.dbc.clone(),
+        state.recording.clone(),
+        frame_rx,
+        bus_load_rx,
+        cancel_rx,
+    );
 
     Ok(())
 }

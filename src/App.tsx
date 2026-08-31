@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import Gauge from "./components/Gauge";
 import Chart, { SeriesPoint } from "./components/Chart";
 import FrameLog from "./components/FrameLog";
@@ -26,8 +26,11 @@ function App() {
   const [streaming, setStreaming] = useState(false);
   const [reconnecting, setReconnecting] = useState<{ attempt: number; maxAttempts: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
   const [dbcPath, setDbcPath] = useState<string | null>(null);
   const [dbcInfo, setDbcInfo] = useState<DbcInfo | null>(null);
+  const [recording, setRecording] = useState(false);
+  const [replaying, setReplaying] = useState(false);
 
   // Which signal (by raw name) drives each of the three gauge/chart slots.
   const [slotSignals, setSlotSignals] = useState<(string | null)[]>([null, null, null]);
@@ -61,10 +64,15 @@ function App() {
       const status = event.payload;
       if (status.state === "reconnecting") {
         setReconnecting({ attempt: status.attempt, maxAttempts: status.max_attempts });
-      } else {
-        setReconnecting(null);
-        setStreaming(false);
+        return;
+      }
+      setReconnecting(null);
+      setStreaming(false);
+      setReplaying(false);
+      if (status.state === "disconnected") {
         setError(`Connection lost: ${status.reason}`);
+      } else {
+        setNote("Replay finished.");
       }
     });
 
@@ -126,9 +134,11 @@ function App() {
 
   async function handleStart() {
     setError(null);
+    setNote(null);
     try {
       await invoke("start_can_stream", { interfaceName, baudRate });
       setStreaming(true);
+      setReplaying(false);
     } catch (e) {
       setError(String(e));
     }
@@ -139,7 +149,45 @@ function App() {
       await invoke("stop_can_stream");
     } finally {
       setStreaming(false);
+      setReplaying(false);
       setReconnecting(null);
+    }
+  }
+
+  async function handleToggleRecording() {
+    setError(null);
+    if (recording) {
+      try {
+        await invoke("stop_recording");
+      } finally {
+        setRecording(false);
+      }
+      return;
+    }
+    try {
+      const path = await save({ filters: [{ name: "CAN Log", extensions: ["log"] }] });
+      if (!path) return;
+      await invoke("start_recording", { path, interface: interfaceName });
+      setRecording(true);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function handleReplay() {
+    setError(null);
+    setNote(null);
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: "CAN Log", extensions: ["log"] }],
+      });
+      if (!selected || Array.isArray(selected)) return;
+      await invoke("start_replay", { path: selected, baudRate, speed: 1.0 });
+      setStreaming(true);
+      setReplaying(true);
+    } catch (e) {
+      setError(String(e));
     }
   }
 
@@ -198,6 +246,26 @@ function App() {
             onChange={(e) => setBaudRate(Number(e.target.value))}
             disabled={streaming}
           />
+          <button
+            onClick={handleToggleRecording}
+            disabled={replaying}
+            title={replaying ? "Can't record while replaying" : "Record raw frames to a .log file"}
+            className={`text-sm font-medium px-3 py-1.5 rounded-md disabled:opacity-50 disabled:cursor-not-allowed ${
+              recording
+                ? "bg-red-900/60 hover:bg-red-900 text-red-200 border border-red-800"
+                : "bg-slate-800 hover:bg-slate-700 text-slate-100"
+            }`}
+          >
+            {recording ? "● Recording" : "Record"}
+          </button>
+          <button
+            onClick={handleReplay}
+            disabled={streaming || !dbcPath}
+            title={!dbcPath ? "Load a .dbc file first" : undefined}
+            className="bg-slate-800 hover:bg-slate-700 text-slate-100 text-sm font-medium px-3 py-1.5 rounded-md disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            Replay Log…
+          </button>
           {!streaming ? (
             <button
               onClick={handleStart}
@@ -221,6 +289,12 @@ function App() {
       {error && (
         <div className="mb-4 text-sm text-red-400 bg-red-950/40 border border-red-900 rounded-md px-3 py-2">
           {error}
+        </div>
+      )}
+
+      {note && (
+        <div className="mb-4 text-sm text-cyan-300 bg-cyan-950/40 border border-cyan-900 rounded-md px-3 py-2">
+          {note}
         </div>
       )}
 
@@ -308,7 +382,9 @@ function App() {
       <footer className="mt-4 text-xs text-slate-600 flex gap-4">
         <span>Frames: {telemetry.frame_count}</span>
         <span>Errors: {telemetry.error_count}</span>
-        <span>Status: {reconnecting ? "reconnecting" : streaming ? "streaming" : "idle"}</span>
+        <span>
+          Status: {reconnecting ? "reconnecting" : streaming ? (replaying ? "replaying" : "streaming") : "idle"}
+        </span>
       </footer>
     </div>
   );

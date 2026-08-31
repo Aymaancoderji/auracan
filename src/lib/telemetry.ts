@@ -7,7 +7,8 @@ export interface TelemetryPayload {
 
 export type StreamStatus =
   | { state: "reconnecting"; attempt: number; max_attempts: number }
-  | { state: "disconnected"; reason: string };
+  | { state: "disconnected"; reason: string }
+  | { state: "finished" };
 
 export interface RawFramePayload {
   id: number;

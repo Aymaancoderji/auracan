@@ -15,7 +15,10 @@ pub fn run() {
             commands::list_can_interfaces,
             commands::load_dbc,
             commands::start_can_stream,
+            commands::start_recording,
+            commands::start_replay,
             commands::stop_can_stream,
+            commands::stop_recording,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
