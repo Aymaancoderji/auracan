@@ -3,12 +3,17 @@ use std::time::Duration;
 
 use crossbeam_channel::unbounded;
 use serde::Serialize;
+use socketcan::tokio::CanSocket;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::{watch, Mutex};
 
 use crate::can::{CanFrame, DbcDatabase};
-use crate::listener::socketcan::{bind_socket, poll_frames};
+use crate::listener::socketcan::{bind_socket, poll_frames, StreamExit};
 use crate::state::TelemetryStore;
+
+/// How many times the reader task retries binding a dropped interface
+/// before giving up and reporting the stream as disconnected.
+const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 
 /// Shared app state exposed to Tauri commands.
 pub struct AppState {
@@ -67,6 +72,61 @@ struct MessageInfo {
 #[derive(Serialize, Clone)]
 pub struct DbcInfo {
     messages: Vec<MessageInfo>,
+}
+
+/// Emitted on the `stream-status` event to tell the frontend about
+/// connection-level changes that aren't a user-initiated start/stop: the
+/// interface dropped and a reconnect is being attempted, or reconnection
+/// was abandoned after [`MAX_RECONNECT_ATTEMPTS`].
+#[derive(Serialize, Clone)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum StreamStatus {
+    Reconnecting { attempt: u32, max_attempts: u32 },
+    Disconnected { reason: String },
+}
+
+/// Lists SocketCAN-capable interfaces present on the system, for the
+/// frontend's interface picker.
+#[tauri::command]
+pub fn list_can_interfaces() -> Vec<String> {
+    crate::listener::socketcan::list_can_interfaces()
+}
+
+/// Retries `bind_socket(interface)` with exponential backoff (500ms, 1s,
+/// 2s, 4s, 8s), emitting a `Reconnecting` status before each attempt.
+/// Returns `None` if `cancel_rx` fires or all attempts are exhausted.
+async fn reconnect_with_backoff(
+    interface: &str,
+    cancel_rx: &mut watch::Receiver<bool>,
+    app: &AppHandle,
+) -> Option<CanSocket> {
+    for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
+        if *cancel_rx.borrow() {
+            return None;
+        }
+        let _ = app.emit(
+            "stream-status",
+            StreamStatus::Reconnecting {
+                attempt,
+                max_attempts: MAX_RECONNECT_ATTEMPTS,
+            },
+        );
+
+        let delay = Duration::from_millis(500 * (1u64 << (attempt - 1)));
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            _ = cancel_rx.changed() => {
+                if *cancel_rx.borrow() {
+                    return None;
+                }
+            }
+        }
+
+        if let Ok(socket) = bind_socket(interface) {
+            return Some(socket);
+        }
+    }
+    None
 }
 
 /// Loads a `.dbc` file into the shared signal database used to decode
@@ -132,10 +192,45 @@ pub async fn start_can_stream(
     let dbc = state.dbc.clone();
     let streaming_flag = state.streaming.clone();
 
-    // Reader task: pulls frames off the kernel socket non-blockingly.
-    let reader_cancel_rx = cancel_rx.clone();
+    // Reader task: pulls frames off the kernel socket non-blockingly. If the
+    // interface drops mid-stream, retries binding it with backoff before
+    // giving up and reporting the stream as disconnected.
+    let mut reader_cancel_rx = cancel_rx.clone();
+    let reader_app = app.clone();
+    let reader_store = store.clone();
+    let reader_interface = interface_name.clone();
     tokio::spawn(async move {
-        poll_frames(socket, frame_tx, Some(bus_load_tx), baud_rate, reader_cancel_rx).await;
+        let mut current_socket = socket;
+        loop {
+            let exit = poll_frames(
+                current_socket,
+                frame_tx.clone(),
+                Some(bus_load_tx.clone()),
+                baud_rate,
+                reader_cancel_rx.clone(),
+            )
+            .await;
+
+            match exit {
+                StreamExit::Cancelled => break,
+                StreamExit::Disconnected(reason) => {
+                    reader_store.record_error();
+                    match reconnect_with_backoff(&reader_interface, &mut reader_cancel_rx, &reader_app).await
+                    {
+                        Some(socket) => current_socket = socket,
+                        None => {
+                            // Distinguish "user hit Stop mid-reconnect" (clean,
+                            // no status event needed) from "gave up retrying".
+                            if !*reader_cancel_rx.borrow() {
+                                let _ =
+                                    reader_app.emit("stream-status", StreamStatus::Disconnected { reason });
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         *streaming_flag.lock().await = false;
     });
 

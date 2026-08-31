@@ -9,6 +9,7 @@ import {
   DbcInfo,
   FlatSignal,
   RawFramePayload,
+  StreamStatus,
   TelemetryPayload,
   flattenSignals,
 } from "./lib/telemetry";
@@ -20,8 +21,10 @@ const SLOT_COLORS = ["#22d3ee", "#facc15", "#a78bfa"];
 
 function App() {
   const [interfaceName, setInterfaceName] = useState("vcan0");
+  const [availableInterfaces, setAvailableInterfaces] = useState<string[]>([]);
   const [baudRate, setBaudRate] = useState(500000);
   const [streaming, setStreaming] = useState(false);
+  const [reconnecting, setReconnecting] = useState<{ attempt: number; maxAttempts: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dbcPath, setDbcPath] = useState<string | null>(null);
   const [dbcInfo, setDbcInfo] = useState<DbcInfo | null>(null);
@@ -46,6 +49,29 @@ function App() {
     dbcInfo?.messages.forEach((m) => map.set(m.id, m.name));
     return map;
   }, [dbcInfo]);
+
+  useEffect(() => {
+    invoke<string[]>("list_can_interfaces")
+      .then(setAvailableInterfaces)
+      .catch(() => setAvailableInterfaces([]));
+  }, []);
+
+  useEffect(() => {
+    const unlistenStreamStatus = listen<StreamStatus>("stream-status", (event) => {
+      const status = event.payload;
+      if (status.state === "reconnecting") {
+        setReconnecting({ attempt: status.attempt, maxAttempts: status.max_attempts });
+      } else {
+        setReconnecting(null);
+        setStreaming(false);
+        setError(`Connection lost: ${status.reason}`);
+      }
+    });
+
+    return () => {
+      unlistenStreamStatus.then((f) => f());
+    };
+  }, []);
 
   useEffect(() => {
     const unlistenTelemetry = listen<TelemetryPayload>("telemetry-update", (event) => {
@@ -113,6 +139,7 @@ function App() {
       await invoke("stop_can_stream");
     } finally {
       setStreaming(false);
+      setReconnecting(null);
     }
   }
 
@@ -156,7 +183,14 @@ function App() {
             value={interfaceName}
             onChange={(e) => setInterfaceName(e.target.value)}
             disabled={streaming}
+            list="can-interfaces"
+            placeholder="vcan0"
           />
+          <datalist id="can-interfaces">
+            {availableInterfaces.map((name) => (
+              <option key={name} value={name} />
+            ))}
+          </datalist>
           <input
             className="bg-slate-900 border border-slate-800 rounded-md px-2 py-1 text-sm w-28"
             type="number"
@@ -187,6 +221,13 @@ function App() {
       {error && (
         <div className="mb-4 text-sm text-red-400 bg-red-950/40 border border-red-900 rounded-md px-3 py-2">
           {error}
+        </div>
+      )}
+
+      {reconnecting && (
+        <div className="mb-4 text-sm text-yellow-400 bg-yellow-950/40 border border-yellow-900 rounded-md px-3 py-2">
+          Connection to {interfaceName} lost. Reconnecting… (attempt {reconnecting.attempt}/
+          {reconnecting.maxAttempts})
         </div>
       )}
 
@@ -267,7 +308,7 @@ function App() {
       <footer className="mt-4 text-xs text-slate-600 flex gap-4">
         <span>Frames: {telemetry.frame_count}</span>
         <span>Errors: {telemetry.error_count}</span>
-        <span>Status: {streaming ? "streaming" : "idle"}</span>
+        <span>Status: {reconnecting ? "reconnecting" : streaming ? "streaming" : "idle"}</span>
       </footer>
     </div>
   );

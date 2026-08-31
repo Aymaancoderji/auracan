@@ -1,3 +1,4 @@
+use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossbeam_channel::Sender;
@@ -5,6 +6,30 @@ use socketcan::tokio::CanSocket;
 use socketcan::{EmbeddedFrame, ExtendedId, Id, StandardId};
 
 use crate::can::CanFrame;
+
+/// `ARPHRD_CAN`, the Linux network device type reported by SocketCAN
+/// interfaces in `/sys/class/net/<iface>/type`.
+const ARPHRD_CAN: u16 = 280;
+
+/// Lists SocketCAN-capable network interfaces currently present on the
+/// system, so the UI can offer a picker instead of requiring the user to
+/// know and type an interface name (e.g. `vcan0`, `can0`) by hand.
+pub fn list_can_interfaces() -> Vec<String> {
+    let mut names = Vec::new();
+    let Ok(entries) = fs::read_dir("/sys/class/net") else {
+        return names;
+    };
+    for entry in entries.flatten() {
+        let type_path = entry.path().join("type");
+        if let Ok(contents) = fs::read_to_string(&type_path) {
+            if contents.trim().parse::<u16>() == Ok(ARPHRD_CAN) {
+                names.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+    }
+    names.sort();
+    names
+}
 
 /// Rolling bus-load estimate over a fixed sample window.
 ///
@@ -60,24 +85,35 @@ pub fn bind_socket(interface: &str) -> Result<CanSocket, String> {
     CanSocket::open(interface).map_err(|e| format!("failed to open {interface}: {e}"))
 }
 
+/// Why [`poll_frames`] stopped reading.
+pub enum StreamExit {
+    /// The caller requested a clean stop via `cancel_rx`.
+    Cancelled,
+    /// The socket read failed — typically because the interface went down
+    /// or was removed (e.g. `ip link del vcan0`, a USB-CAN adapter
+    /// unplugged). The socket is not usable after this and must be
+    /// rebound.
+    Disconnected(String),
+}
+
 /// Continuously reads frames from the socket and forwards decoded
 /// [`CanFrame`] values to `tx`, along with periodic bus-load samples sent
-/// through `bus_load_tx`. Runs until the socket errors or the task is
-/// cancelled.
+/// through `bus_load_tx`. Runs until the socket errors, the frame receiver
+/// is dropped, or the task is cancelled.
 pub async fn poll_frames(
     socket: CanSocket,
     tx: Sender<CanFrame>,
     bus_load_tx: Option<Sender<f64>>,
     baud_rate: u32,
     mut cancel_rx: tokio::sync::watch::Receiver<bool>,
-) {
+) -> StreamExit {
     let mut monitor = BusLoadMonitor::new(baud_rate, 100_000);
 
     loop {
         tokio::select! {
             _ = cancel_rx.changed() => {
                 if *cancel_rx.borrow() {
-                    break;
+                    return StreamExit::Cancelled;
                 }
             }
             frame = socket.read_frame() => {
@@ -88,7 +124,7 @@ pub async fn poll_frames(
                         let can_frame = CanFrame::new(id, is_extended, data, now_us());
 
                         if tx.send(can_frame).is_err() {
-                            break;
+                            return StreamExit::Cancelled;
                         }
 
                         if let Some(load) = monitor.record_frame(can_frame.dlc, is_extended) {
@@ -97,7 +133,7 @@ pub async fn poll_frames(
                             }
                         }
                     }
-                    Err(_) => continue,
+                    Err(e) => return StreamExit::Disconnected(e.to_string()),
                 }
             }
         }

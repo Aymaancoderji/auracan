@@ -5,6 +5,10 @@ export interface TelemetryPayload {
   error_count: number;
 }
 
+export type StreamStatus =
+  | { state: "reconnecting"; attempt: number; max_attempts: number }
+  | { state: "disconnected"; reason: string };
+
 export interface RawFramePayload {
   id: number;
   is_extended: boolean;
