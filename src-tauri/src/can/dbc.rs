@@ -17,6 +17,8 @@ pub struct SignalDecoder {
     pub factor: f64,
     pub offset: f64,
     pub unit: String,
+    pub min: f64,
+    pub max: f64,
 }
 
 impl SignalDecoder {
@@ -155,6 +157,17 @@ fn parse_signal_line(rest: &str) -> Option<SignalDecoder> {
         })
         .unwrap_or_default();
 
+    let (min, max) = after_layout
+        .find('[')
+        .zip(after_layout.find(']'))
+        .and_then(|(start, end)| {
+            let (min_str, max_str) = after_layout[start + 1..end].split_once('|')?;
+            let min: f64 = min_str.trim().parse().ok()?;
+            let max: f64 = max_str.trim().parse().ok()?;
+            Some((min, max))
+        })
+        .unwrap_or((0.0, 0.0));
+
     Some(SignalDecoder {
         name,
         start_bit,
@@ -164,6 +177,8 @@ fn parse_signal_line(rest: &str) -> Option<SignalDecoder> {
         factor,
         offset,
         unit,
+        min,
+        max,
     })
 }
 

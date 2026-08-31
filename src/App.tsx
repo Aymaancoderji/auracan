@@ -1,14 +1,22 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import Gauge from "./components/Gauge";
 import Chart, { SeriesPoint } from "./components/Chart";
 import FrameLog from "./components/FrameLog";
-import { RawFramePayload, TelemetryPayload } from "./lib/telemetry";
+import {
+  DbcInfo,
+  FlatSignal,
+  RawFramePayload,
+  TelemetryPayload,
+  flattenSignals,
+} from "./lib/telemetry";
 
 const MAX_POINTS = 120;
 const MAX_FRAMES = 200;
+
+const SLOT_COLORS = ["#22d3ee", "#facc15", "#a78bfa"];
 
 function App() {
   const [interfaceName, setInterfaceName] = useState("vcan0");
@@ -16,7 +24,10 @@ function App() {
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dbcPath, setDbcPath] = useState<string | null>(null);
-  const [dbcMessageCount, setDbcMessageCount] = useState<number | null>(null);
+  const [dbcInfo, setDbcInfo] = useState<DbcInfo | null>(null);
+
+  // Which signal (by raw name) drives each of the three gauge/chart slots.
+  const [slotSignals, setSlotSignals] = useState<(string | null)[]>([null, null, null]);
 
   const [telemetry, setTelemetry] = useState<TelemetryPayload>({
     signals: {},
@@ -24,11 +35,17 @@ function App() {
     frame_count: 0,
     error_count: 0,
   });
-  const [rpmSeries, setRpmSeries] = useState<SeriesPoint[]>([]);
-  const [tempSeries, setTempSeries] = useState<SeriesPoint[]>([]);
-  const [currentSeries, setCurrentSeries] = useState<SeriesPoint[]>([]);
+  const [series, setSeries] = useState<SeriesPoint[][]>([[], [], []]);
   const [frames, setFrames] = useState<RawFramePayload[]>([]);
   const tRef = useRef(0);
+
+  const flatSignals: FlatSignal[] = useMemo(() => (dbcInfo ? flattenSignals(dbcInfo) : []), [dbcInfo]);
+
+  const messageNameById = useMemo(() => {
+    const map = new Map<number, string>();
+    dbcInfo?.messages.forEach((m) => map.set(m.id, m.name));
+    return map;
+  }, [dbcInfo]);
 
   useEffect(() => {
     const unlistenTelemetry = listen<TelemetryPayload>("telemetry-update", (event) => {
@@ -37,17 +54,14 @@ function App() {
       tRef.current += 1;
       const t = tRef.current;
 
-      const push = (setter: React.Dispatch<React.SetStateAction<SeriesPoint[]>>, v: number | undefined) => {
-        if (v === undefined) return;
-        setter((prev) => {
-          const next = [...prev, { t, v }];
+      setSeries((prev) =>
+        slotSignals.map((sigName, i) => {
+          const v = sigName ? payload.signals[sigName] : undefined;
+          if (v === undefined) return prev[i];
+          const next = [...prev[i], { t, v }];
           return next.length > MAX_POINTS ? next.slice(next.length - MAX_POINTS) : next;
-        });
-      };
-
-      push(setRpmSeries, payload.signals["MotorRPM"]);
-      push(setTempSeries, payload.signals["ControllerTemp"]);
-      push(setCurrentSeries, payload.signals["OutputCurrent"]);
+        })
+      );
     });
 
     const unlistenFrame = listen<RawFramePayload>("can-frame", (event) => {
@@ -61,7 +75,7 @@ function App() {
       unlistenTelemetry.then((f) => f());
       unlistenFrame.then((f) => f());
     };
-  }, []);
+  }, [slotSignals]);
 
   async function handleLoadDbc() {
     setError(null);
@@ -71,9 +85,14 @@ function App() {
         filters: [{ name: "DBC", extensions: ["dbc"] }],
       });
       if (!selected || Array.isArray(selected)) return;
-      const count = await invoke<number>("load_dbc", { path: selected });
+      const info = await invoke<DbcInfo>("load_dbc", { path: selected });
       setDbcPath(selected);
-      setDbcMessageCount(count);
+      setDbcInfo(info);
+      const defaults = flattenSignals(info)
+        .slice(0, 3)
+        .map((s) => s.name);
+      setSlotSignals([defaults[0] ?? null, defaults[1] ?? null, defaults[2] ?? null]);
+      setSeries([[], [], []]);
     } catch (e) {
       setError(String(e));
     }
@@ -97,9 +116,25 @@ function App() {
     }
   }
 
-  const rpm = telemetry.signals["MotorRPM"] ?? 0;
-  const temp = telemetry.signals["ControllerTemp"] ?? 0;
-  const current = telemetry.signals["OutputCurrent"] ?? 0;
+  function handleSlotChange(slot: number, name: string) {
+    setSlotSignals((prev) => {
+      const next = [...prev];
+      next[slot] = name || null;
+      return next;
+    });
+    setSeries((prev) => {
+      const next = [...prev];
+      next[slot] = [];
+      return next;
+    });
+  }
+
+  function signalRange(sig: FlatSignal | undefined) {
+    if (!sig || (sig.min === 0 && sig.max === 0)) {
+      return { min: 0, max: 100 };
+    }
+    return { min: sig.min, max: sig.max };
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 p-6">
@@ -114,7 +149,7 @@ function App() {
             disabled={streaming}
             className="bg-slate-800 hover:bg-slate-700 text-slate-100 text-sm font-medium px-3 py-1.5 rounded-md disabled:opacity-50"
           >
-            {dbcPath ? `DBC: ${dbcMessageCount} msgs` : "Load DBC"}
+            {dbcInfo ? `DBC: ${dbcInfo.messages.length} msgs` : "Load DBC"}
           </button>
           <input
             className="bg-slate-900 border border-slate-800 rounded-md px-2 py-1 text-sm w-24"
@@ -155,10 +190,44 @@ function App() {
         </div>
       )}
 
+      {dbcInfo && (
+        <div className="grid grid-cols-3 gap-4 mb-2">
+          {slotSignals.map((sigName, i) => (
+            <select
+              key={i}
+              value={sigName ?? ""}
+              onChange={(e) => handleSlotChange(i, e.target.value)}
+              className="bg-slate-900 border border-slate-800 rounded-md px-2 py-1 text-xs text-slate-300"
+            >
+              <option value="">— none —</option>
+              {flatSignals.map((sig) => (
+                <option key={`${sig.messageId}.${sig.name}`} value={sig.name}>
+                  {sig.messageName}.{sig.name} {sig.unit ? `(${sig.unit})` : ""}
+                </option>
+              ))}
+            </select>
+          ))}
+        </div>
+      )}
+
       <div className="grid grid-cols-4 gap-4 mb-4">
-        <Gauge label="Motor RPM" value={rpm} min={0} max={8000} unit="rpm" warnAt={6000} dangerAt={7500} />
-        <Gauge label="Controller Temp" value={temp} min={-40} max={150} unit="°C" warnAt={90} dangerAt={110} />
-        <Gauge label="Output Current" value={current} min={0} max={400} unit="A" warnAt={300} dangerAt={360} />
+        {slotSignals.map((sigName, i) => {
+          const sig = flatSignals.find((s) => s.name === sigName);
+          const { min, max } = signalRange(sig);
+          const value = sigName ? telemetry.signals[sigName] ?? 0 : 0;
+          return (
+            <Gauge
+              key={i}
+              label={sig ? `${sig.messageName}.${sig.name}` : `Slot ${i + 1}`}
+              value={value}
+              min={min}
+              max={max}
+              unit={sig?.unit ?? ""}
+              warnAt={min + (max - min) * 0.75}
+              dangerAt={min + (max - min) * 0.9}
+            />
+          );
+        })}
         <Gauge
           label="Bus Load"
           value={telemetry.bus_load_pct}
@@ -171,13 +240,22 @@ function App() {
       </div>
 
       <div className="grid grid-cols-3 gap-4 mb-4">
-        <Chart title="Motor RPM" color="#22d3ee" points={rpmSeries} unit="rpm" />
-        <Chart title="Controller Temp" color="#facc15" points={tempSeries} unit="°C" />
-        <Chart title="Output Current" color="#a78bfa" points={currentSeries} unit="A" />
+        {slotSignals.map((sigName, i) => {
+          const sig = flatSignals.find((s) => s.name === sigName);
+          return (
+            <Chart
+              key={i}
+              title={sig ? `${sig.messageName}.${sig.name}` : `Slot ${i + 1}`}
+              color={SLOT_COLORS[i]}
+              points={series[i]}
+              unit={sig?.unit ?? ""}
+            />
+          );
+        })}
       </div>
 
       <div className="grid grid-cols-1 gap-4 h-64">
-        <FrameLog frames={frames} />
+        <FrameLog frames={frames} messageNameById={messageNameById} />
       </div>
 
       <footer className="mt-4 text-xs text-slate-600 flex gap-4">

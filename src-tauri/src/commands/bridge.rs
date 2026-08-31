@@ -46,14 +46,55 @@ struct RawFramePayload {
     timestamp_us: u64,
 }
 
+#[derive(Serialize, Clone)]
+struct SignalInfo {
+    name: String,
+    unit: String,
+    min: f64,
+    max: f64,
+}
+
+#[derive(Serialize, Clone)]
+struct MessageInfo {
+    id: u32,
+    name: String,
+    signals: Vec<SignalInfo>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct DbcInfo {
+    messages: Vec<MessageInfo>,
+}
+
 /// Loads a `.dbc` file into the shared signal database used to decode
-/// incoming frames.
+/// incoming frames, and returns the parsed message/signal listing so the
+/// frontend can let the user pick which signals to display.
 #[tauri::command]
-pub async fn load_dbc(state: State<'_, AppState>, path: String) -> Result<usize, String> {
+pub async fn load_dbc(state: State<'_, AppState>, path: String) -> Result<DbcInfo, String> {
     let db = DbcDatabase::load_from_file(&path).map_err(|e| e.to_string())?;
-    let count = db.messages.len();
+
+    let mut messages: Vec<MessageInfo> = db
+        .messages
+        .values()
+        .map(|msg| MessageInfo {
+            id: msg.id,
+            name: msg.name.clone(),
+            signals: msg
+                .signals
+                .iter()
+                .map(|sig| SignalInfo {
+                    name: sig.name.clone(),
+                    unit: sig.unit.clone(),
+                    min: sig.min,
+                    max: sig.max,
+                })
+                .collect(),
+        })
+        .collect();
+    messages.sort_by_key(|m| m.id);
+
     *state.dbc.lock().await = db;
-    Ok(count)
+    Ok(DbcInfo { messages })
 }
 
 /// Opens the given SocketCAN interface, spawns the async reader task, and
