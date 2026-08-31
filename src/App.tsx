@@ -5,6 +5,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import Gauge from "./components/Gauge";
 import Chart, { SeriesPoint } from "./components/Chart";
 import FrameLog from "./components/FrameLog";
+import AlertLog from "./components/AlertLog";
 import {
   DbcInfo,
   FlatSignal,
@@ -13,6 +14,7 @@ import {
   TelemetryPayload,
   flattenSignals,
 } from "./lib/telemetry";
+import { AlertEntry, levelFor, notifyDanger } from "./lib/alerts";
 
 const MAX_POINTS = 120;
 const MAX_FRAMES = 200;
@@ -43,7 +45,9 @@ function App() {
   });
   const [series, setSeries] = useState<SeriesPoint[][]>([[], [], []]);
   const [frames, setFrames] = useState<RawFramePayload[]>([]);
+  const [alerts, setAlerts] = useState<AlertEntry[]>([]);
   const tRef = useRef(0);
+  const levelsRef = useRef<Record<string, "normal" | "warning" | "danger">>({});
 
   const flatSignals: FlatSignal[] = useMemo(() => (dbcInfo ? flattenSignals(dbcInfo) : []), [dbcInfo]);
 
@@ -96,6 +100,32 @@ function App() {
           return next.length > MAX_POINTS ? next.slice(next.length - MAX_POINTS) : next;
         })
       );
+
+      const newAlerts: AlertEntry[] = [];
+      const checkLevel = (key: string, label: string, value: number, unit: string, warnAt: number, dangerAt: number) => {
+        const level = levelFor(value, warnAt, dangerAt);
+        const prevLevel = levelsRef.current[key] ?? "normal";
+        if (level === prevLevel) return;
+        levelsRef.current[key] = level;
+        const entryLevel = level === "normal" ? "cleared" : level;
+        newAlerts.push({ id: `${Date.now()}-${key}-${level}`, time: Date.now(), label, level: entryLevel, value, unit });
+        if (level === "danger") notifyDanger(label, value, unit);
+      };
+
+      slotSignals.forEach((sigName, i) => {
+        if (!sigName) return;
+        const value = payload.signals[sigName];
+        if (value === undefined) return;
+        const sig = flatSignals.find((s) => s.name === sigName);
+        const { min, max } = signalRange(sig);
+        const label = sig ? `${sig.messageName}.${sig.name}` : `Slot ${i + 1}`;
+        checkLevel(`slot-${i}`, label, value, sig?.unit ?? "", min + (max - min) * 0.75, min + (max - min) * 0.9);
+      });
+      checkLevel("bus-load", "Bus Load", payload.bus_load_pct, "%", 70, 90);
+
+      if (newAlerts.length > 0) {
+        setAlerts((prev) => [...newAlerts.reverse(), ...prev].slice(0, 200));
+      }
     });
 
     const unlistenFrame = listen<RawFramePayload>("can-frame", (event) => {
@@ -109,7 +139,7 @@ function App() {
       unlistenTelemetry.then((f) => f());
       unlistenFrame.then((f) => f());
     };
-  }, [slotSignals]);
+  }, [slotSignals, flatSignals]);
 
   async function handleLoadDbc() {
     setError(null);
@@ -202,6 +232,7 @@ function App() {
       next[slot] = [];
       return next;
     });
+    delete levelsRef.current[`slot-${slot}`];
   }
 
   function signalRange(sig: FlatSignal | undefined) {
@@ -375,8 +406,11 @@ function App() {
         })}
       </div>
 
-      <div className="grid grid-cols-1 gap-4 h-64">
-        <FrameLog frames={frames} messageNameById={messageNameById} />
+      <div className="grid grid-cols-3 gap-4 h-64">
+        <div className="col-span-2 h-full">
+          <FrameLog frames={frames} messageNameById={messageNameById} />
+        </div>
+        <AlertLog alerts={alerts} />
       </div>
 
       <footer className="mt-4 text-xs text-slate-600 flex gap-4">
