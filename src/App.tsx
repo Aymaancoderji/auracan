@@ -15,27 +15,32 @@ import {
   flattenSignals,
 } from "./lib/telemetry";
 import { AlertEntry, levelFor, notifyDanger } from "./lib/alerts";
+import { loadSettings, saveSettings } from "./lib/settings";
 
 const MAX_POINTS = 120;
 const MAX_FRAMES = 200;
+const MIN_SLOTS = 1;
+const MAX_SLOTS = 6;
 
-const SLOT_COLORS = ["#22d3ee", "#facc15", "#a78bfa"];
+const SLOT_COLORS = ["#22d3ee", "#facc15", "#a78bfa", "#34d399", "#fb7185", "#818cf8"];
+
+const initialSettings = loadSettings();
 
 function App() {
-  const [interfaceName, setInterfaceName] = useState("vcan0");
+  const [interfaceName, setInterfaceName] = useState(initialSettings.interfaceName);
   const [availableInterfaces, setAvailableInterfaces] = useState<string[]>([]);
-  const [baudRate, setBaudRate] = useState(500000);
+  const [baudRate, setBaudRate] = useState(initialSettings.baudRate);
   const [streaming, setStreaming] = useState(false);
   const [reconnecting, setReconnecting] = useState<{ attempt: number; maxAttempts: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
-  const [dbcPath, setDbcPath] = useState<string | null>(null);
+  const [dbcPath, setDbcPath] = useState<string | null>(initialSettings.dbcPath);
   const [dbcInfo, setDbcInfo] = useState<DbcInfo | null>(null);
   const [recording, setRecording] = useState(false);
   const [replaying, setReplaying] = useState(false);
 
-  // Which signal (by raw name) drives each of the three gauge/chart slots.
-  const [slotSignals, setSlotSignals] = useState<(string | null)[]>([null, null, null]);
+  // Which signal (by raw name) drives each gauge/chart slot.
+  const [slotSignals, setSlotSignals] = useState<(string | null)[]>(initialSettings.slotSignals);
 
   const [telemetry, setTelemetry] = useState<TelemetryPayload>({
     signals: {},
@@ -43,7 +48,7 @@ function App() {
     frame_count: 0,
     error_count: 0,
   });
-  const [series, setSeries] = useState<SeriesPoint[][]>([[], [], []]);
+  const [series, setSeries] = useState<SeriesPoint[][]>(() => initialSettings.slotSignals.map(() => []));
   const [frames, setFrames] = useState<RawFramePayload[]>([]);
   const [alerts, setAlerts] = useState<AlertEntry[]>([]);
   const tRef = useRef(0);
@@ -62,6 +67,23 @@ function App() {
       .then(setAvailableInterfaces)
       .catch(() => setAvailableInterfaces([]));
   }, []);
+
+  // Re-load the last-used DBC on startup so slot selections (also
+  // persisted) still resolve to real signals instead of showing blank
+  // "Slot N" placeholders. If the file moved/was deleted, fail quietly —
+  // the user can just pick a new one via "Load DBC".
+  useEffect(() => {
+    if (!initialSettings.dbcPath) return;
+    invoke<DbcInfo>("load_dbc", { path: initialSettings.dbcPath })
+      .then((info) => setDbcInfo(info))
+      .catch(() => setDbcPath(null));
+  }, []);
+
+  // Persist dashboard settings (debounced isn't necessary — these change
+  // rarely, not per telemetry tick).
+  useEffect(() => {
+    saveSettings({ interfaceName, baudRate, dbcPath, slotSignals });
+  }, [interfaceName, baudRate, dbcPath, slotSignals]);
 
   useEffect(() => {
     const unlistenStreamStatus = listen<StreamStatus>("stream-status", (event) => {
@@ -152,14 +174,28 @@ function App() {
       const info = await invoke<DbcInfo>("load_dbc", { path: selected });
       setDbcPath(selected);
       setDbcInfo(info);
-      const defaults = flattenSignals(info)
-        .slice(0, 3)
-        .map((s) => s.name);
-      setSlotSignals([defaults[0] ?? null, defaults[1] ?? null, defaults[2] ?? null]);
-      setSeries([[], [], []]);
+      const defaultNames = flattenSignals(info).map((s) => s.name);
+      setSlotSignals((prev) => prev.map((_, i) => defaultNames[i] ?? null));
+      setSeries((prev) => prev.map(() => []));
+      levelsRef.current = {};
     } catch (e) {
       setError(String(e));
     }
+  }
+
+  function handleAddSlot() {
+    setSlotSignals((prev) => (prev.length >= MAX_SLOTS ? prev : [...prev, null]));
+    setSeries((prev) => (prev.length >= MAX_SLOTS ? prev : [...prev, []]));
+  }
+
+  function handleRemoveSlot(slot: number) {
+    setSlotSignals((prev) => (prev.length <= MIN_SLOTS ? prev : prev.filter((_, i) => i !== slot)));
+    setSeries((prev) => (prev.length <= MIN_SLOTS ? prev : prev.filter((_, i) => i !== slot)));
+    // Indices shift after a removal, so per-slot alert level tracking (keyed
+    // by index) would otherwise misattribute stale levels to the wrong slot.
+    levelsRef.current = Object.fromEntries(
+      Object.entries(levelsRef.current).filter(([key]) => !key.startsWith("slot-"))
+    );
   }
 
   async function handleStart() {
@@ -337,30 +373,46 @@ function App() {
       )}
 
       {dbcInfo && (
-        <div className="grid grid-cols-3 gap-4 mb-2">
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4 mb-2">
           {slotSignals.map((sigName, i) => (
-            <select
-              key={i}
-              value={sigName ?? ""}
-              onChange={(e) => handleSlotChange(i, e.target.value)}
-              className="bg-slate-900 border border-slate-800 rounded-md px-2 py-1 text-xs text-slate-300"
-            >
-              <option value="">— none —</option>
-              {flatSignals.map((sig) => (
-                <option
-                  key={`${sig.messageId}.${sig.name}`}
-                  value={sig.name}
-                  title={sig.description ?? undefined}
-                >
-                  {sig.messageName}.{sig.name} {sig.unit ? `(${sig.unit})` : ""}
-                </option>
-              ))}
-            </select>
+            <div key={i} className="flex items-center gap-1">
+              <select
+                value={sigName ?? ""}
+                onChange={(e) => handleSlotChange(i, e.target.value)}
+                className="flex-1 min-w-0 bg-slate-900 border border-slate-800 rounded-md px-2 py-1 text-xs text-slate-300"
+              >
+                <option value="">— none —</option>
+                {flatSignals.map((sig) => (
+                  <option
+                    key={`${sig.messageId}.${sig.name}`}
+                    value={sig.name}
+                    title={sig.description ?? undefined}
+                  >
+                    {sig.messageName}.{sig.name} {sig.unit ? `(${sig.unit})` : ""}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={() => handleRemoveSlot(i)}
+                disabled={slotSignals.length <= MIN_SLOTS}
+                title="Remove slot"
+                className="text-slate-500 hover:text-red-400 disabled:opacity-30 disabled:cursor-not-allowed px-1"
+              >
+                ×
+              </button>
+            </div>
           ))}
+          <button
+            onClick={handleAddSlot}
+            disabled={slotSignals.length >= MAX_SLOTS}
+            className="border border-dashed border-slate-700 text-slate-500 hover:text-slate-300 hover:border-slate-500 rounded-md px-2 py-1 text-xs disabled:opacity-30 disabled:cursor-not-allowed"
+          >
+            + Add slot
+          </button>
         </div>
       )}
 
-      <div className="grid grid-cols-4 gap-4 mb-4">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(160px,1fr))] gap-4 mb-4">
         {slotSignals.map((sigName, i) => {
           const sig = flatSignals.find((s) => s.name === sigName);
           const { min, max } = signalRange(sig);
@@ -391,14 +443,14 @@ function App() {
         />
       </div>
 
-      <div className="grid grid-cols-3 gap-4 mb-4">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-4 mb-4">
         {slotSignals.map((sigName, i) => {
           const sig = flatSignals.find((s) => s.name === sigName);
           return (
             <Chart
               key={i}
               title={sig ? `${sig.messageName}.${sig.name}` : `Slot ${i + 1}`}
-              color={SLOT_COLORS[i]}
+              color={SLOT_COLORS[i % SLOT_COLORS.length]}
               points={series[i]}
               unit={sig?.unit ?? ""}
             />
