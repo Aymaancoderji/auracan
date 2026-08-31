@@ -18,11 +18,15 @@ export interface SignalInfo {
   unit: string;
   min: number;
   max: number;
+  description: string | null;
+  /** Enum-style value labels (from a DBC `VAL_` table), keyed by raw integer value. */
+  value_table: Record<string, string>;
 }
 
 export interface MessageInfo {
   id: number;
   name: string;
+  description: string | null;
   signals: SignalInfo[];
 }
 

@@ -6,9 +6,11 @@ interface GaugeProps {
   unit: string;
   warnAt?: number;
   dangerAt?: number;
+  /** If set (e.g. from a DBC VAL_ table), shown instead of the raw number. */
+  valueLabel?: string;
 }
 
-export default function Gauge({ label, value, min, max, unit, warnAt, dangerAt }: GaugeProps) {
+export default function Gauge({ label, value, min, max, unit, warnAt, dangerAt, valueLabel }: GaugeProps) {
   const clamped = Math.min(Math.max(value, min), max);
   const pct = (clamped - min) / (max - min);
   const angle = -120 + pct * 240;
@@ -51,8 +53,15 @@ export default function Gauge({ label, value, min, max, unit, warnAt, dangerAt }
         />
         <line x1={cx} y1={cy} x2={vx} y2={vy} stroke={color} strokeWidth="2" />
         <circle cx={cx} cy={cy} r="4" fill={color} />
-        <text x={cx} y={cy + 24} textAnchor="middle" className="fill-slate-100" fontSize="20" fontWeight="600">
-          {clamped.toFixed(0)}
+        <text
+          x={cx}
+          y={cy + 24}
+          textAnchor="middle"
+          className="fill-slate-100"
+          fontSize={valueLabel ? "14" : "20"}
+          fontWeight="600"
+        >
+          {valueLabel ?? clamped.toFixed(0)}
         </text>
         <text x={cx} y={cy + 40} textAnchor="middle" className="fill-slate-500" fontSize="11">
           {unit}

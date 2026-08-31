@@ -52,12 +52,15 @@ struct SignalInfo {
     unit: String,
     min: f64,
     max: f64,
+    description: Option<String>,
+    value_table: std::collections::HashMap<i64, String>,
 }
 
 #[derive(Serialize, Clone)]
 struct MessageInfo {
     id: u32,
     name: String,
+    description: Option<String>,
     signals: Vec<SignalInfo>,
 }
 
@@ -79,6 +82,7 @@ pub async fn load_dbc(state: State<'_, AppState>, path: String) -> Result<DbcInf
         .map(|msg| MessageInfo {
             id: msg.id,
             name: msg.name.clone(),
+            description: msg.description.clone(),
             signals: msg
                 .signals
                 .iter()
@@ -87,6 +91,8 @@ pub async fn load_dbc(state: State<'_, AppState>, path: String) -> Result<DbcInf
                     unit: sig.unit.clone(),
                     min: sig.min,
                     max: sig.max,
+                    description: sig.description.clone(),
+                    value_table: sig.value_table.clone(),
                 })
                 .collect(),
         })

@@ -201,7 +201,11 @@ function App() {
             >
               <option value="">— none —</option>
               {flatSignals.map((sig) => (
-                <option key={`${sig.messageId}.${sig.name}`} value={sig.name}>
+                <option
+                  key={`${sig.messageId}.${sig.name}`}
+                  value={sig.name}
+                  title={sig.description ?? undefined}
+                >
                   {sig.messageName}.{sig.name} {sig.unit ? `(${sig.unit})` : ""}
                 </option>
               ))}
@@ -215,6 +219,7 @@ function App() {
           const sig = flatSignals.find((s) => s.name === sigName);
           const { min, max } = signalRange(sig);
           const value = sigName ? telemetry.signals[sigName] ?? 0 : 0;
+          const valueLabel = sig?.value_table[String(Math.trunc(value))];
           return (
             <Gauge
               key={i}
@@ -225,6 +230,7 @@ function App() {
               unit={sig?.unit ?? ""}
               warnAt={min + (max - min) * 0.75}
               dangerAt={min + (max - min) * 0.9}
+              valueLabel={valueLabel}
             />
           );
         })}
