@@ -281,9 +281,31 @@ function App() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 p-6">
       <header className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-xl font-semibold tracking-tight">AuraCAN</h1>
-          <p className="text-xs text-slate-500">Real-Time SocketCAN Telemetry Engine</p>
+        <div className="flex items-center gap-3">
+          <div>
+            <h1 className="text-xl font-semibold tracking-tight">AuraCAN</h1>
+            <p className="text-xs text-slate-500">Real-Time SocketCAN Telemetry Engine</p>
+          </div>
+          <span
+            className={`flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded-full border ${
+              reconnecting
+                ? "text-yellow-300 border-yellow-800 bg-yellow-950/40"
+                : streaming
+                ? "text-emerald-300 border-emerald-800 bg-emerald-950/40"
+                : "text-slate-500 border-slate-800 bg-slate-900"
+            }`}
+          >
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                reconnecting
+                  ? "bg-yellow-400 animate-pulse"
+                  : streaming
+                  ? "bg-emerald-400 animate-pulse"
+                  : "bg-slate-600"
+              }`}
+            />
+            {reconnecting ? "Reconnecting" : streaming ? (replaying ? "Replaying" : "Streaming") : "Idle"}
+          </span>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -354,14 +376,28 @@ function App() {
       </header>
 
       {error && (
-        <div className="mb-4 text-sm text-red-400 bg-red-950/40 border border-red-900 rounded-md px-3 py-2">
-          {error}
+        <div className="mb-4 flex items-start justify-between gap-3 text-sm text-red-400 bg-red-950/40 border border-red-900 rounded-md px-3 py-2">
+          <span>{error}</span>
+          <button
+            onClick={() => setError(null)}
+            aria-label="Dismiss error"
+            className="text-red-500 hover:text-red-300 leading-none"
+          >
+            ×
+          </button>
         </div>
       )}
 
       {note && (
-        <div className="mb-4 text-sm text-cyan-300 bg-cyan-950/40 border border-cyan-900 rounded-md px-3 py-2">
-          {note}
+        <div className="mb-4 flex items-start justify-between gap-3 text-sm text-cyan-300 bg-cyan-950/40 border border-cyan-900 rounded-md px-3 py-2">
+          <span>{note}</span>
+          <button
+            onClick={() => setNote(null)}
+            aria-label="Dismiss notice"
+            className="text-cyan-500 hover:text-cyan-200 leading-none"
+          >
+            ×
+          </button>
         </div>
       )}
 
