@@ -157,10 +157,16 @@ npm run test:watch
 
 Covers the pure logic in `src/lib/` (alert-level classification, DBC
 signal flattening, hex/byte formatting, settings persistence incl.
-malformed-storage fallback) and a couple of component render checks
-(`Gauge`, `AlertLog`). Not yet covered: `App.tsx` itself (would need
-mocking `@tauri-apps/api`'s `invoke`/`listen`, which only work inside a
-real Tauri webview) and `Chart`/`FrameLog`.
+malformed-storage fallback) and component render checks (`Gauge`,
+`AlertLog`, `Chart`, `FrameLog` incl. its ID/name filter). Not yet
+covered: `App.tsx` itself (would need mocking `@tauri-apps/api`'s
+`invoke`/`listen`, which only work inside a real Tauri webview).
+
+> Note: on Node >= 22, `npm test`/`npm run test:watch` set
+> `NODE_OPTIONS=--no-experimental-webstorage` to stop Node's own global
+> `localStorage` stub (which throws unless `--localstorage-file` is
+> given) from shadowing jsdom's, which the settings-persistence tests
+> need.
 
 ## Platform
 
