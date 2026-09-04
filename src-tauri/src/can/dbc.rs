@@ -32,6 +32,15 @@ pub struct SignalDecoder {
     pub min: f64,
     pub max: f64,
     pub mux: Option<MuxIndicator>,
+    /// For a `Multiplexed` signal, the name of the selector signal that
+    /// controls it, as named by an `SG_MUL_VAL_` line. `None` means "the
+    /// message's sole `M` signal" (the common, non-extended case).
+    pub mux_switch: Option<String>,
+    /// Selector value ranges from an `SG_MUL_VAL_` line, e.g. `1-1,4-6`
+    /// (inclusive bounds). When present, this replaces the single `m<N>`
+    /// value as the activation test. `None` falls back to exact-match on
+    /// the `m<N>` value.
+    pub mux_ranges: Option<Vec<(i64, i64)>>,
     /// Enum-style value labels from a `VAL_` line, keyed by raw integer value.
     pub value_table: HashMap<i64, String>,
     /// Free-text description from a `CM_ SG_` line, if any.
@@ -68,6 +77,23 @@ pub struct MessageDef {
     pub signals: Vec<SignalDecoder>,
     /// Free-text description from a `CM_ BO_` line, if any.
     pub description: Option<String>,
+    /// `GenMsgCycleTime` attribute value (ms), from a
+    /// `BA_ "GenMsgCycleTime" BO_ <id> <value>;` line, if present.
+    pub cycle_time_ms: Option<u32>,
+    /// `SIG_GROUP_` declarations for this message: related signals that are
+    /// meant to be sampled/updated together. Metadata only — not used by
+    /// `decode_frame`.
+    pub signal_groups: Vec<SignalGroup>,
+}
+
+/// A `SIG_GROUP_ <msg_id> <name> <repetitions> : <sig1> <sig2> ...;`
+/// declaration: a named set of signals within one message that logically
+/// belong together (e.g. must be read as a consistent snapshot).
+#[derive(Debug, Clone, Serialize)]
+pub struct SignalGroup {
+    pub name: String,
+    pub repetitions: u32,
+    pub signals: Vec<String>,
 }
 
 /// A parsed DBC database: message definitions keyed by CAN arbitration ID.
@@ -116,6 +142,8 @@ impl DbcDatabase {
                                 dlc,
                                 signals: Vec::new(),
                                 description: None,
+                                cycle_time_ms: None,
+                                signal_groups: Vec::new(),
                             },
                         );
                         current_id = Some(id);
@@ -138,6 +166,15 @@ impl DbcDatabase {
             } else if let Some(rest) = trimmed.strip_prefix("VAL_ ") {
                 apply_value_table(&mut messages, rest);
                 current_id = None;
+            } else if let Some(rest) = trimmed.strip_prefix("SG_MUL_VAL_ ") {
+                apply_mux_val(&mut messages, rest);
+                current_id = None;
+            } else if let Some(rest) = trimmed.strip_prefix("SIG_GROUP_ ") {
+                apply_signal_group(&mut messages, rest);
+                current_id = None;
+            } else if let Some(rest) = trimmed.strip_prefix("BA_ ") {
+                apply_attribute(&mut messages, rest);
+                current_id = None;
             } else if trimmed.is_empty() || !trimmed.starts_with(char::is_whitespace) && !trimmed.starts_with("SG_") {
                 // Any other top-level keyword (BA_, BU_, ...) ends the
                 // current message block's signal context unless it's BO_.
@@ -157,15 +194,36 @@ impl DbcDatabase {
     pub fn decode_frame(&self, frame: &CanFrame) -> HashMap<String, f64> {
         let mut out = HashMap::new();
         if let Some(msg) = self.messages.get(&frame.id) {
-            let mux_value = msg
+            // Raw value of every selector (`M`) signal in this message, by
+            // name. Ordinary single-selector messages have exactly one;
+            // extended multiplexing (`SG_MUL_VAL_` naming a switch per
+            // signal) can have more.
+            let selectors: HashMap<&str, i64> = msg
                 .signals
                 .iter()
-                .find(|s| s.mux == Some(MuxIndicator::Multiplexor))
-                .map(|s| s.raw_value(&frame.data));
+                .filter(|s| s.mux == Some(MuxIndicator::Multiplexor))
+                .map(|s| (s.name.as_str(), s.raw_value(&frame.data)))
+                .collect();
+            let sole_selector = if selectors.len() == 1 {
+                selectors.values().next().copied()
+            } else {
+                None
+            };
 
             for sig in &msg.signals {
-                let active = match sig.mux {
-                    Some(MuxIndicator::Multiplexed(n)) => mux_value == Some(n as i64),
+                let active = match &sig.mux {
+                    Some(MuxIndicator::Multiplexed(n)) => {
+                        let selector_value = sig
+                            .mux_switch
+                            .as_deref()
+                            .and_then(|name| selectors.get(name).copied())
+                            .or(sole_selector);
+                        match (&sig.mux_ranges, selector_value) {
+                            (Some(ranges), Some(v)) => ranges.iter().any(|(lo, hi)| v >= *lo && v <= *hi),
+                            (None, Some(v)) => v == *n as i64,
+                            (_, None) => false,
+                        }
+                    }
                     _ => true,
                 };
                 if active {
@@ -240,6 +298,84 @@ fn apply_value_table(messages: &mut HashMap<u32, MessageDef>, rest: &str) {
     }
 }
 
+/// Applies an `SG_MUL_VAL_ <msg_id> <signal_name> <switch_name> <r1>-<r1>[,<r2>-<r2>...];`
+/// line: names the selector signal (`switch_name`) and the inclusive value
+/// range(s) over which `signal_name` is active, for extended (multi-range
+/// and/or multi-selector) multiplexing.
+fn apply_mux_val(messages: &mut HashMap<u32, MessageDef>, rest: &str) {
+    let rest = rest.trim().trim_end_matches(';').trim();
+    let mut tokens = rest.splitn(4, ' ');
+    let Ok(id) = tokens.next().unwrap_or_default().parse::<u32>() else { return };
+    let Some(sig_name) = tokens.next() else { return };
+    let Some(switch_name) = tokens.next() else { return };
+    let Some(ranges_str) = tokens.next() else { return };
+
+    let ranges: Vec<(i64, i64)> = ranges_str
+        .split(',')
+        .filter_map(|r| {
+            let (lo, hi) = r.trim().split_once('-')?;
+            Some((lo.trim().parse().ok()?, hi.trim().parse().ok()?))
+        })
+        .collect();
+    if ranges.is_empty() {
+        return;
+    }
+
+    if let Some(msg) = messages.get_mut(&id) {
+        if let Some(sig) = msg.signals.iter_mut().find(|s| s.name == sig_name) {
+            sig.mux_switch = Some(switch_name.to_string());
+            sig.mux_ranges = Some(ranges);
+        }
+    }
+}
+
+/// Applies a `SIG_GROUP_ <msg_id> <group_name> <repetitions> : <sig1> <sig2> ...;`
+/// line as metadata on the message (see [`SignalGroup`]).
+fn apply_signal_group(messages: &mut HashMap<u32, MessageDef>, rest: &str) {
+    let rest = rest.trim().trim_end_matches(';').trim();
+    let Some((header, signals_str)) = rest.split_once(':') else { return };
+    let mut header_tokens = header.split_whitespace();
+    let Some(id_str) = header_tokens.next() else { return };
+    let Ok(id) = id_str.parse::<u32>() else { return };
+    let Some(name) = header_tokens.next() else { return };
+    let repetitions: u32 = header_tokens.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+    let signals: Vec<String> = signals_str.split_whitespace().map(str::to_string).collect();
+
+    if let Some(msg) = messages.get_mut(&id) {
+        msg.signal_groups.push(SignalGroup {
+            name: name.to_string(),
+            repetitions,
+            signals,
+        });
+    }
+}
+
+/// Applies a `BA_ "GenMsgCycleTime" BO_ <msg_id> <value>;` message
+/// attribute line. Other `BA_` attributes (signal-, node-, or
+/// network-scoped; anything but `GenMsgCycleTime`) are recognized-and-
+/// ignored, not errored on.
+fn apply_attribute(messages: &mut HashMap<u32, MessageDef>, rest: &str) {
+    let rest = rest.trim().trim_end_matches(';').trim();
+    let Some(name) = extract_quoted(rest) else { return };
+    if name != "GenMsgCycleTime" {
+        return;
+    }
+    // Skip past the closing quote of "GenMsgCycleTime" to reach `BO_ <id> <value>`.
+    let Some(quote_start) = rest.find('"') else { return };
+    let Some(quote_len) = rest[quote_start + 1..].find('"') else { return };
+    let after_name = &rest[quote_start + 1 + quote_len + 1..];
+    let Some(after_bo) = after_name.trim_start().strip_prefix("BO_ ") else { return };
+    let mut tokens = after_bo.split_whitespace();
+    let Some(id_str) = tokens.next() else { return };
+    let Ok(id) = id_str.parse::<u32>() else { return };
+    let Some(value_str) = tokens.next() else { return };
+    let Ok(value) = value_str.parse::<u32>() else { return };
+
+    if let Some(msg) = messages.get_mut(&id) {
+        msg.cycle_time_ms = Some(value);
+    }
+}
+
 /// Parses a single `SG_` line body, e.g.:
 /// `MotorRPM : 0|16@1- (1,0) [-32000|32000] "rpm" ECU`
 fn parse_signal_line(rest: &str) -> Option<SignalDecoder> {
@@ -307,6 +443,8 @@ fn parse_signal_line(rest: &str) -> Option<SignalDecoder> {
         min,
         max,
         mux,
+        mux_switch: None,
+        mux_ranges: None,
         value_table: HashMap::new(),
         description: None,
     })
@@ -392,5 +530,45 @@ VAL_ 256 GearSelect 0 "Park" 1 "Reverse" 2 "Neutral" 3 "Drive" ;
         assert_eq!(sig.description.as_deref(), Some("Current commanded gear."));
         assert_eq!(sig.value_table.get(&3).map(String::as_str), Some("Drive"));
         assert_eq!(sig.value_table.len(), 4);
+    }
+
+    const EXTENDED_MUX_DBC: &str = r#"
+BO_ 640 DiagExtended: 8 MCU
+ SG_ Mode M : 0|8@1+ (1,0) [0|255] "" ECU
+ SG_ CalibValue m0 : 8|8@1+ (1,0) [0|255] "" ECU
+ SG_ SelfTestResult m0 : 8|8@1+ (1,0) [0|255] "" ECU
+SG_MUL_VAL_ 640 CalibValue Mode 1-3,5-5;
+BA_DEF_ BO_ "GenMsgCycleTime" INT 0 10000;
+BA_ "GenMsgCycleTime" BO_ 640 100;
+SIG_GROUP_ 640 CalibGroup 1 : CalibValue SelfTestResult;
+"#;
+
+    #[test]
+    fn applies_extended_mux_value_ranges() {
+        let db = DbcDatabase::parse(EXTENDED_MUX_DBC);
+        let msg = db.messages.get(&640).expect("message present");
+        let calib = msg.signals.iter().find(|s| s.name == "CalibValue").unwrap();
+        assert_eq!(calib.mux_switch.as_deref(), Some("Mode"));
+        assert_eq!(calib.mux_ranges, Some(vec![(1, 3), (5, 5)]));
+
+        // Mode = 2 is within the 1-3 range -> CalibValue active.
+        let data = [2, 77, 0, 0, 0, 0, 0, 0];
+        let decoded = db.decode_frame(&CanFrame::new(640, false, &data, 0));
+        assert_eq!(decoded.get("CalibValue").copied(), Some(77.0));
+
+        // Mode = 4 is in neither range -> CalibValue inactive.
+        let data = [4, 77, 0, 0, 0, 0, 0, 0];
+        let decoded = db.decode_frame(&CanFrame::new(640, false, &data, 0));
+        assert!(!decoded.contains_key("CalibValue"));
+    }
+
+    #[test]
+    fn applies_cycle_time_attribute_and_signal_group() {
+        let db = DbcDatabase::parse(EXTENDED_MUX_DBC);
+        let msg = db.messages.get(&640).expect("message present");
+        assert_eq!(msg.cycle_time_ms, Some(100));
+        assert_eq!(msg.signal_groups.len(), 1);
+        assert_eq!(msg.signal_groups[0].name, "CalibGroup");
+        assert_eq!(msg.signal_groups[0].signals, vec!["CalibValue", "SelfTestResult"]);
     }
 }
