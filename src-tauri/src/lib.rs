@@ -12,6 +12,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
+            commands::export_csv,
             commands::list_can_interfaces,
             commands::load_dbc,
             commands::start_can_stream,

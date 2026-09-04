@@ -62,3 +62,22 @@ export function formatBytes(data: number[], dlc: number): string {
     .map((b) => b.toString(16).toUpperCase().padStart(2, "0"))
     .join(" ");
 }
+
+/** Renders raw frames (newest-first, as displayed) as CSV, oldest-first so it reads chronologically. */
+export function framesToCsv(frames: RawFramePayload[], messageNameById: Map<number, string>): string {
+  const header = "id,message,dlc,data,timestamp_us";
+  const rows = [...frames]
+    .reverse()
+    .map((f) =>
+      [
+        formatHex(f.id, f.is_extended),
+        messageNameById.get(f.id) ?? "",
+        f.dlc,
+        formatBytes(f.data, f.dlc),
+        f.timestamp_us,
+      ]
+        .map((v) => `"${String(v).replace(/"/g, '""')}"`)
+        .join(",")
+    );
+  return [header, ...rows].join("\n");
+}

@@ -1,5 +1,7 @@
 import { useMemo, useState } from "react";
-import { RawFramePayload, formatBytes, formatHex } from "../lib/telemetry";
+import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
+import { RawFramePayload, formatBytes, formatHex, framesToCsv } from "../lib/telemetry";
 
 interface FrameLogProps {
   frames: RawFramePayload[];
@@ -19,16 +21,32 @@ export default function FrameLog({ frames, messageNameById }: FrameLogProps) {
     });
   }, [frames, filter, messageNameById]);
 
+  async function handleExportCsv() {
+    const path = await save({ filters: [{ name: "CSV", extensions: ["csv"] }] });
+    if (!path) return;
+    await invoke("export_csv", { path, contents: framesToCsv(filtered, messageNameById) });
+  }
+
   return (
     <div className="rounded-xl bg-slate-900/60 border border-slate-800 p-4 flex flex-col h-full">
       <div className="flex items-center justify-between mb-2">
         <div className="text-xs uppercase tracking-wide text-slate-400">Raw Frame Inspector</div>
-        <input
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          placeholder="Filter by ID or message name…"
-          className="bg-slate-900 border border-slate-800 rounded-md px-2 py-1 text-xs w-56"
-        />
+        <div className="flex items-center gap-2">
+          <input
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="Filter by ID or message name…"
+            className="bg-slate-900 border border-slate-800 rounded-md px-2 py-1 text-xs w-56"
+          />
+          <button
+            onClick={handleExportCsv}
+            disabled={frames.length === 0}
+            title="Export the frames currently shown as CSV"
+            className="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium px-2 py-1 rounded-md disabled:opacity-30 disabled:cursor-not-allowed"
+          >
+            Export CSV
+          </button>
+        </div>
       </div>
       <div className="overflow-y-auto flex-1 font-mono text-xs">
         <table className="w-full text-left">

@@ -5,6 +5,7 @@ export interface PersistedSettings {
   baudRate: number;
   dbcPath: string | null;
   slotSignals: (string | null)[];
+  soundEnabled: boolean;
 }
 
 const DEFAULTS: PersistedSettings = {
@@ -12,6 +13,7 @@ const DEFAULTS: PersistedSettings = {
   baudRate: 500000,
   dbcPath: null,
   slotSignals: [null, null, null],
+  soundEnabled: true,
 };
 
 /** Loads persisted dashboard settings from localStorage, falling back to defaults for anything missing or malformed. */
@@ -25,6 +27,7 @@ export function loadSettings(): PersistedSettings {
       baudRate: typeof parsed.baudRate === "number" ? parsed.baudRate : DEFAULTS.baudRate,
       dbcPath: typeof parsed.dbcPath === "string" ? parsed.dbcPath : null,
       slotSignals: Array.isArray(parsed.slotSignals) ? parsed.slotSignals : DEFAULTS.slotSignals,
+      soundEnabled: typeof parsed.soundEnabled === "boolean" ? parsed.soundEnabled : DEFAULTS.soundEnabled,
     };
   } catch {
     return { ...DEFAULTS };

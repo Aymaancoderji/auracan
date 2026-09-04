@@ -17,13 +17,14 @@ signal database, and streams telemetry to a React/TypeScript dashboard.
   DBC `[min|max]`. Layout, interface, baud rate, and DBC path persist
   across restarts.
 - Threshold alerts: a running log of every signal crossing into/out of
-  warning or danger, with a beep + desktop notification on danger.
+  warning or danger, with a beep + desktop notification on danger. The
+  beep can be muted from the header (persists across restarts).
 - Recording & replay: capture raw frames to a `candump -l`-compatible
   log (inspectable/replayable with standard `can-utils` too), and replay
   one back through the identical decode/UI pipeline at recorded (or
   scaled) speed — useful for offline debugging without live hardware.
 - Raw frame inspector with a live filter by hex/decimal ID or message
-  name.
+  name, and CSV export of the currently filtered frames.
 
 ## Layout
 
@@ -58,17 +59,24 @@ subset of the DBC grammar, not the full spec. Supported:
 - Multiplexed signals: a selector signal marked `M` and dependent signals
   marked `m<N>`; only the signals matching the current frame's selector
   value are decoded and emitted (see `decodes_only_the_active_multiplexed_signal`
-  in `dbc.rs`'s tests). Extended multiplexing (multiple selectors, mux
-  value ranges) is not supported.
+  in `dbc.rs`'s tests). Extended multiplexing is also supported:
+  `SG_MUL_VAL_ <msg> <signal> <switch> <lo>-<hi>[,<lo>-<hi>...];` names a
+  per-signal selector and inclusive value range(s), covering both
+  multi-range activation and multiple independent selector signals in one
+  message (see `applies_extended_mux_value_ranges`).
 - `VAL_` enum tables, attached per-signal as `value_table` and shown in
   place of the raw number when a gauge's current value matches an entry.
 - `CM_ BO_`/`CM_ SG_` comments, surfaced as tooltips/descriptions.
+- `BA_ "GenMsgCycleTime" BO_ <id> <value>;` — parsed onto
+  `MessageDef::cycle_time_ms`. Other `BA_`/`BA_DEF_` attributes are
+  recognized-and-ignored.
+- `SIG_GROUP_ <msg> <name> <repetitions> : <sig1> <sig2> ...;` — parsed
+  onto `MessageDef::signal_groups` as metadata (not used in decoding).
 
 Not supported (parsed lines are ignored, not errored on): `BA_`/`BA_DEF_`
-attributes (e.g. cycle time, non-`VAL_` defaults), `BO_TX_BU_`,
-`EV_`/environment variables, `SG_MUL_VAL_` (extended multiplexing), and
-`SIG_GROUP_`. A `.dbc` using only those won't fail to load — those
-signals just won't decode.
+attributes other than `GenMsgCycleTime`, `BO_TX_BU_`, and
+`EV_`/environment variables. A `.dbc` using only those won't fail to
+load — those signals just won't decode.
 
 ## Prerequisites (Linux)
 
@@ -167,6 +175,13 @@ covered: `App.tsx` itself (would need mocking `@tauri-apps/api`'s
 > `localStorage` stub (which throws unless `--localstorage-file` is
 > given) from shadowing jsdom's, which the settings-persistence tests
 > need.
+
+## CI & releases
+
+`.github/workflows/ci.yml` runs on every push/PR to `main`: installs the
+GTK/WebKit headers, then runs `npm run build` (tsc + vite), `npm test`,
+and `cargo test`. `.github/workflows/release.yml` builds a `.deb`/AppImage
+and drafts a GitHub release via `tauri-action` when a `v*` tag is pushed.
 
 ## Platform
 

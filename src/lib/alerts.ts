@@ -36,9 +36,9 @@ function beep() {
   }
 }
 
-/** Beeps and, if permitted, raises a desktop notification for a danger-level alert. */
-export function notifyDanger(label: string, value: number, unit: string) {
-  beep();
+/** Beeps (unless `soundEnabled` is false) and, if permitted, raises a desktop notification for a danger-level alert. */
+export function notifyDanger(label: string, value: number, unit: string, soundEnabled = true) {
+  if (soundEnabled) beep();
 
   if (typeof Notification === "undefined") return;
   const body = `${label}: ${value.toFixed(1)}${unit}`;

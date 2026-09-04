@@ -107,6 +107,14 @@ enum StreamStatus {
     Finished,
 }
 
+/// Writes `contents` to `path`, overwriting it if it already exists. Used
+/// by the frontend to export CSV (frame log, recorded sessions) without
+/// pulling in a filesystem plugin/capability for a single write.
+#[tauri::command]
+pub fn export_csv(path: String, contents: String) -> Result<(), String> {
+    std::fs::write(&path, contents).map_err(|e| format!("failed to write {path}: {e}"))
+}
+
 /// Lists SocketCAN-capable interfaces present on the system, for the
 /// frontend's interface picker.
 #[tauri::command]

@@ -38,6 +38,7 @@ function App() {
   const [dbcInfo, setDbcInfo] = useState<DbcInfo | null>(null);
   const [recording, setRecording] = useState(false);
   const [replaying, setReplaying] = useState(false);
+  const [soundEnabled, setSoundEnabled] = useState(initialSettings.soundEnabled);
 
   // Which signal (by raw name) drives each gauge/chart slot.
   const [slotSignals, setSlotSignals] = useState<(string | null)[]>(initialSettings.slotSignals);
@@ -82,8 +83,8 @@ function App() {
   // Persist dashboard settings (debounced isn't necessary — these change
   // rarely, not per telemetry tick).
   useEffect(() => {
-    saveSettings({ interfaceName, baudRate, dbcPath, slotSignals });
-  }, [interfaceName, baudRate, dbcPath, slotSignals]);
+    saveSettings({ interfaceName, baudRate, dbcPath, slotSignals, soundEnabled });
+  }, [interfaceName, baudRate, dbcPath, slotSignals, soundEnabled]);
 
   useEffect(() => {
     const unlistenStreamStatus = listen<StreamStatus>("stream-status", (event) => {
@@ -131,7 +132,7 @@ function App() {
         levelsRef.current[key] = level;
         const entryLevel = level === "normal" ? "cleared" : level;
         newAlerts.push({ id: `${Date.now()}-${key}-${level}`, time: Date.now(), label, level: entryLevel, value, unit });
-        if (level === "danger") notifyDanger(label, value, unit);
+        if (level === "danger") notifyDanger(label, value, unit, soundEnabled);
       };
 
       slotSignals.forEach((sigName, i) => {
@@ -161,7 +162,7 @@ function App() {
       unlistenTelemetry.then((f) => f());
       unlistenFrame.then((f) => f());
     };
-  }, [slotSignals, flatSignals]);
+  }, [slotSignals, flatSignals, soundEnabled]);
 
   async function handleLoadDbc() {
     setError(null);
@@ -308,6 +309,18 @@ function App() {
           </span>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => setSoundEnabled((v) => !v)}
+            title={soundEnabled ? "Mute danger-alert sound" : "Unmute danger-alert sound"}
+            aria-label={soundEnabled ? "Mute alert sound" : "Unmute alert sound"}
+            className={`text-sm font-medium px-3 py-1.5 rounded-md ${
+              soundEnabled
+                ? "bg-slate-800 hover:bg-slate-700 text-slate-100"
+                : "bg-slate-900 hover:bg-slate-800 text-slate-500 border border-slate-800"
+            }`}
+          >
+            {soundEnabled ? "Sound On" : "Muted"}
+          </button>
           <button
             onClick={handleLoadDbc}
             disabled={streaming}
